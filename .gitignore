@@ -1,0 +1,52 @@
+# Python and uv
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Secrets and local settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Legal-source data, local indexes, and runtime artifacts
+data/raw/
+data/processed/
+data/cache/
+data/eval/runs/
+qdrant_storage/
+postgres_data/
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# Build and tooling artifacts
+build/
+dist/
+.tox/
+.nox/
+playwright-report/
+test-results/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
