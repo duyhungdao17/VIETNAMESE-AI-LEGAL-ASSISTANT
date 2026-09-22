@@ -44,6 +44,7 @@ playwright-report/
 test-results/
 
 # Editors and operating systems
+.worktrees/
 .vscode/
 .idea/
 *.swp
