@@ -6,10 +6,52 @@
 
 ## Status | Trạng thái
 
-**Architecture and agent-workflow foundation.** This repository currently contains the proposed architecture and project workflows. It does **not** yet contain a crawler, API, index, Docker Compose configuration, or published benchmark. Roadmap items and target commands are not implementation claims.
+**Architecture and agent-workflow foundation.** This repository now includes a pilot ingestion CLI with immutable raw artifacts, manifests, checkpoints, and API/HTML hybrid acquisition. It does not yet contain the application API, index, Docker Compose configuration, or a published benchmark.
 
 **Nền tảng kiến trúc và workflow cho agent.** Repository hiện chứa kiến trúc và workflow đề xuất; **chưa** có crawler, API, index, Docker Compose hay benchmark công bố. Roadmap không phải là claim rằng tính năng đã chạy.
 
+
+## Pilot ingestion | Pilot crawl
+
+The `legal-assistant` CLI supports `api`, `html`, and `hybrid` source modes. `hybrid` is the default: it discovers metadata through a permitted public API, stores the raw JSON response, and falls back to the canonical public HTML document only when API detail lacks document content. No production endpoint is hard-coded.
+
+- Use `--source-mode hybrid` with `--api-list-url`, `--api-detail-url-template`, and `--document-url-template` for a permitted public API pilot.
+- Use `--source-mode html --listing-url <public-listing>` when an API is unavailable.
+- Start with `--limit 3` or `10`; configure `--request-delay-seconds` (default `1.5`).
+- Stop on `401`/`403`, retry `429` only a bounded number of times, and never bypass CAPTCHA, cookies, or access controls.
+- Raw JSON, HTML, and PDF artifacts remain immutable under `data/raw/<dataset-version>/`; `manifest.json` records provenance and checkpoint state.
+
+All legal statuses are retained during ingestion. Status-based selection belongs to later retrieval policy, not raw-data deletion.
+### Public gateway pilot
+
+`sync-vbpl` is the dedicated, checkpointable CLI for the permitted public VBPL gateway. The gateway base URL is supplied at run time and is never committed. It persists the raw list response for each page, then the raw detail JSON and embedded HTML for each selected document.
+
+```powershell
+$gatewayBaseUrl = $env:LEGAL_ASSISTANT_GATEWAY_BASE_URL
+legal-assistant sync-vbpl `
+  --api-base-url $gatewayBaseUrl `
+  --dataset-version vbpl-gateway-pilot-v1 `
+  --page-size 10 `
+  --max-pages 100 `
+  --request-delay-seconds 1.5 `
+  --confirm-public-source-access
+```
+
+The pilot stops after `--max-pages` pages. Use `--all-pages` only after reviewing the pilot manifest and obtaining the required authorization for a full re-ingestion. The gateway selector stores only documents whose literal status is `Còn hiệu lực`, `Hết hiệu lực một phần`, or `Chưa có hiệu lực`; it still records counts for all statuses returned by the list response. It does not delete historical source data.
+
+Output is written to `data/raw/<dataset-version>/`: immutable `artifacts/` files plus `manifest.json`. The manifest records source URLs, hashes, timestamps, selected status, skipped-status counts, per-page discovery artifacts, completed IDs, pending detail retries, and the last completed page. Resume the same dataset/configuration with `--resume`:
+
+```powershell
+legal-assistant sync-vbpl `
+  --api-base-url $gatewayBaseUrl `
+  --dataset-version vbpl-gateway-pilot-v1 `
+  --page-size 10 `
+  --max-pages 100 `
+  --resume `
+  --confirm-public-source-access
+```
+
+Exit code `2` means source access was blocked or redirected outside the approved origin; do not bypass CAPTCHA, credentials, cookies, or access controls.
 ## Purpose | Mục tiêu
 
 An end-to-end Vietnamese legal **research** assistant: authoritative-source ingestion → legal parsing → hybrid retrieval → grounded generation → citation verification → evaluation → API → Docker → CI. It is not a legal-advice service.
