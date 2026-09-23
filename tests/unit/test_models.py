@@ -43,3 +43,16 @@ def test_manifest_preserves_artifact_provenance_and_dedup_reference() -> None:
     assert manifest.records[0].artifacts[0].source_url == "https://example.test/document/123"
     assert manifest.records[0].deduplicates_artifact_id == "artifact-prior"
     assert manifest.checkpoint.completed_source_ids == ["vbpl:123"]
+
+def test_source_profile_requires_api_endpoints_for_hybrid_mode() -> None:
+    from legal_assistant.ingestion import models
+
+    profile = models.SourceProfile(
+        source_identifier="vbpl",
+        mode="hybrid",
+        api_list_url="https://api.example.test/documents",
+        api_detail_url_template="https://api.example.test/doc/{doc_id}",
+        document_url_template="https://www.example.test/doc/{doc_id}",
+    )
+
+    assert profile.request_delay_seconds == 1.5

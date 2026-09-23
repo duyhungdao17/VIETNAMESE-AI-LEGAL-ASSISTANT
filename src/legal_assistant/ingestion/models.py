@@ -4,10 +4,34 @@ from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+
+class SourceMode(StrEnum):
+    API = "api"
+    HTML = "html"
+    HYBRID = "hybrid"
+
+
+class SourceProfile(BaseModel):
+    source_identifier: str
+    mode: SourceMode = SourceMode.HYBRID
+    listing_url: str | None = None
+    api_list_url: str | None = None
+    api_detail_url_template: str | None = None
+    document_url_template: str | None = None
+    request_delay_seconds: float = Field(default=1.5, ge=0)
+
+    @model_validator(mode="after")
+    def validate_mode_endpoints(self) -> "SourceProfile":
+        if self.mode in {SourceMode.API, SourceMode.HYBRID} and not all((self.api_list_url, self.api_detail_url_template, self.document_url_template)):
+            raise ValueError("API and hybrid modes require API list, API detail, and document URL templates")
+        if self.mode is SourceMode.HTML and self.listing_url is None:
+            raise ValueError("HTML mode requires a listing URL")
+        return self
 
 class ArtifactKind(StrEnum):
+    DOCUMENT_JSON = "document_json"
     DOCUMENT_HTML = "document_html"
     ORIGINAL_PDF = "original_pdf"
     PDF_TEXT = "pdf_text"
@@ -20,6 +44,7 @@ class SeedRecord(BaseModel):
     selection_bucket: str
     source_status_label: str | None = None
     selection_reason: str | None = None
+    api_detail_url: str | None = None
 
 
 class RawArtifact(BaseModel):

@@ -6,10 +6,22 @@
 
 ## Status | Trạng thái
 
-**Architecture and agent-workflow foundation.** This repository currently contains the proposed architecture and project workflows. It does **not** yet contain a crawler, API, index, Docker Compose configuration, or published benchmark. Roadmap items and target commands are not implementation claims.
+**Architecture and agent-workflow foundation.** This repository now includes a pilot ingestion CLI with immutable raw artifacts, manifests, checkpoints, and API/HTML hybrid acquisition. It does not yet contain the application API, index, Docker Compose configuration, or a published benchmark.
 
 **Nền tảng kiến trúc và workflow cho agent.** Repository hiện chứa kiến trúc và workflow đề xuất; **chưa** có crawler, API, index, Docker Compose hay benchmark công bố. Roadmap không phải là claim rằng tính năng đã chạy.
 
+
+## Pilot ingestion | Pilot crawl
+
+The `legal-assistant` CLI supports `api`, `html`, and `hybrid` source modes. `hybrid` is the default: it discovers metadata through a permitted public API, stores the raw JSON response, and falls back to the canonical public HTML document only when API detail lacks document content. No production endpoint is hard-coded.
+
+- Use `--source-mode hybrid` with `--api-list-url`, `--api-detail-url-template`, and `--document-url-template` for a permitted public API pilot.
+- Use `--source-mode html --listing-url <public-listing>` when an API is unavailable.
+- Start with `--limit 3` or `10`; configure `--request-delay-seconds` (default `1.5`).
+- Stop on `401`/`403`, retry `429` only a bounded number of times, and never bypass CAPTCHA, cookies, or access controls.
+- Raw JSON, HTML, and PDF artifacts remain immutable under `data/raw/<dataset-version>/`; `manifest.json` records provenance and checkpoint state.
+
+All legal statuses are retained during ingestion. Status-based selection belongs to later retrieval policy, not raw-data deletion.
 ## Purpose | Mục tiêu
 
 An end-to-end Vietnamese legal **research** assistant: authoritative-source ingestion → legal parsing → hybrid retrieval → grounded generation → citation verification → evaluation → API → Docker → CI. It is not a legal-advice service.
