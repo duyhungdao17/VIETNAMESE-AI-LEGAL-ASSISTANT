@@ -56,3 +56,19 @@ def test_source_profile_requires_api_endpoints_for_hybrid_mode() -> None:
     )
 
     assert profile.request_delay_seconds == 1.5
+
+def test_manifest_tracks_gateway_discovery_state() -> None:
+    manifest = DatasetManifest(
+        dataset_version="vbpl-gateway-pilot-v1",
+        schema_version="2",
+        config_version="2",
+        source_identifier="vbpl_gateway",
+        source_base_url="https://example.test/api",
+        seed_sha256="config-hash",
+    )
+
+    assert manifest.discovery_artifacts == []
+    assert manifest.status_counts == {}
+    assert manifest.discovery_complete is False
+    assert manifest.discovery_incomplete is False
+    assert manifest.checkpoint.last_completed_page == 0

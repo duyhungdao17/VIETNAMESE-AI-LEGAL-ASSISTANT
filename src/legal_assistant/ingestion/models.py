@@ -30,7 +30,9 @@ class SourceProfile(BaseModel):
             raise ValueError("HTML mode requires a listing URL")
         return self
 
+
 class ArtifactKind(StrEnum):
+    DISCOVERY_JSON = "discovery_json"
     DOCUMENT_JSON = "document_json"
     DOCUMENT_HTML = "document_html"
     ORIGINAL_PDF = "original_pdf"
@@ -60,7 +62,7 @@ class RawArtifact(BaseModel):
     source_artifact_id: str | None = None
 
     @classmethod
-    def from_bytes(cls, *, artifact_id: str, kind: ArtifactKind, source_id: str, source_url: str, fetched_at: datetime, payload: bytes, relative_path: str, media_type: str, http_status: int, source_artifact_id: str | None = None) -> RawArtifact:
+    def from_bytes(cls, *, artifact_id: str, kind: ArtifactKind, source_id: str, source_url: str, fetched_at: datetime, payload: bytes, relative_path: str, media_type: str, http_status: int, source_artifact_id: str | None = None) -> "RawArtifact":
         return cls(artifact_id=artifact_id, kind=kind, source_id=source_id, source_url=source_url, fetched_at=fetched_at, sha256=sha256(payload).hexdigest(), relative_path=relative_path, media_type=media_type, http_status=http_status, source_artifact_id=source_artifact_id)
 
 
@@ -87,6 +89,9 @@ class CrawlRecord(BaseModel):
 class CrawlCheckpoint(BaseModel):
     completed_source_ids: list[str] = Field(default_factory=list)
     failed_source_ids: list[str] = Field(default_factory=list)
+    seen_source_ids: list[str] = Field(default_factory=list)
+    last_completed_page: int = 0
+    observed_total: int | None = None
     stopped_reason: str | None = None
 
 
@@ -98,5 +103,11 @@ class DatasetManifest(BaseModel):
     source_base_url: str
     seed_sha256: str
     records: list[CrawlRecord] = Field(default_factory=list)
+    discovery_artifacts: list[RawArtifact] = Field(default_factory=list)
+    pending_seeds: list[SeedRecord] = Field(default_factory=list)
     checkpoint: CrawlCheckpoint = Field(default_factory=CrawlCheckpoint)
     retrieval_errors: list[str] = Field(default_factory=list)
+    status_counts: dict[str, int] = Field(default_factory=dict)
+    skipped_status_counts: dict[str, int] = Field(default_factory=dict)
+    discovery_complete: bool = False
+    discovery_incomplete: bool = False

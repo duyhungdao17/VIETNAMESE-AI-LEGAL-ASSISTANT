@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -10,6 +11,7 @@ import httpx
 
 from .ingestion.crawler import CrawlService, SourceAccessBlocked, SourceScopeViolation
 from .ingestion.discovery import DiscoveryService
+from .ingestion.gateway import VBPLGatewaySyncService
 from .ingestion.manifest import load_manifest, write_manifest
 from .ingestion.models import DatasetManifest, SeedRecord, SourceMode, SourceProfile
 from .ingestion.pdf_extract import PdfTextExtractor
@@ -43,6 +45,55 @@ def prepare_manifest(dataset_root: Path, dataset_version: str, source_base_url: 
     manifest = load_manifest(dataset_root)
     if (manifest.dataset_version, manifest.schema_version, manifest.config_version, manifest.source_identifier, manifest.source_base_url, manifest.seed_sha256) != (dataset_version, "1", "1", "vbpl", source_base_url, seed_sha256):
         raise DatasetCompatibilityError("existing manifest is incompatible with this source, schema, config, or seed")
+    return manifest
+
+
+
+
+def prepare_gateway_manifest(
+    dataset_root: Path,
+    dataset_version: str,
+    api_base_url: str,
+    *,
+    page_size: int,
+    resume: bool,
+) -> DatasetManifest:
+    """Create or validate a resumable manifest for the public VBPL gateway."""
+    source_base_url = api_base_url.rstrip("/")
+    configuration = {
+        "gateway_route_version": "qtdc-public-v1",
+        "page_size": page_size,
+        "selected_status_buckets": ["active", "partially_expired", "future"],
+    }
+    config_sha256 = hashlib.sha256(
+        json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    manifest_path = dataset_root / "manifest.json"
+    expected = (dataset_version, "2", "2", "vbpl_gateway", source_base_url, config_sha256)
+    if not manifest_path.exists():
+        if dataset_root.exists() and any(dataset_root.iterdir()):
+            raise DatasetCompatibilityError("dataset directory contains data but no manifest")
+        return DatasetManifest(
+            dataset_version=dataset_version,
+            schema_version="2",
+            config_version="2",
+            source_identifier="vbpl_gateway",
+            source_base_url=source_base_url,
+            seed_sha256=config_sha256,
+        )
+    if not resume:
+        raise DatasetCompatibilityError("dataset version already exists; use a new version or --resume")
+    manifest = load_manifest(dataset_root)
+    actual = (
+        manifest.dataset_version,
+        manifest.schema_version,
+        manifest.config_version,
+        manifest.source_identifier,
+        manifest.source_base_url,
+        manifest.seed_sha256,
+    )
+    if actual != expected:
+        raise DatasetCompatibilityError("existing manifest is incompatible with this gateway configuration")
     return manifest
 
 
@@ -133,6 +184,41 @@ def _extract_pdf(args: argparse.Namespace) -> int:
     return 0
 
 
+
+
+def _sync_vbpl(args: argparse.Namespace) -> int:
+    dataset_root = Path(args.data_root) / args.dataset_version
+    manifest = prepare_gateway_manifest(
+        dataset_root,
+        args.dataset_version,
+        args.api_base_url,
+        page_size=args.page_size,
+        resume=args.resume,
+    )
+    store = RawStore(dataset_root)
+    with httpx.Client(headers={"User-Agent": "legal-assistant-research/0.1"}, timeout=30.0) as client:
+        service = VBPLGatewaySyncService(
+            client=client,
+            store=store,
+            api_base_url=args.api_base_url,
+            request_delay_seconds=args.request_delay_seconds,
+            checkpoint_writer=lambda state: write_manifest(dataset_root, state),
+        )
+        try:
+            service.sync(
+                manifest,
+                page_size=args.page_size,
+                max_pages=None if args.all_pages else args.max_pages,
+            )
+        except (SourceAccessBlocked, SourceScopeViolation) as error:
+            manifest.checkpoint.stopped_reason = str(error)
+            manifest.retrieval_errors.append(str(error))
+            return 2
+        finally:
+            write_manifest(dataset_root, manifest)
+    return 0
+
+
 def _source_mode_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--source-mode", choices=[mode.value for mode in SourceMode], default=SourceMode.HYBRID.value)
     parser.add_argument("--request-delay-seconds", type=float, default=1.5)
@@ -158,6 +244,16 @@ def build_parser() -> argparse.ArgumentParser:
     crawl.add_argument("--resume", action="store_true")
     _source_mode_arguments(crawl)
     crawl.add_argument("--confirm-public-source-access", action="store_true", required=True)
+    sync = commands.add_parser("sync-vbpl")
+    sync.add_argument("--api-base-url", required=True)
+    sync.add_argument("--dataset-version", required=True)
+    sync.add_argument("--data-root", default="data/raw")
+    sync.add_argument("--page-size", type=int, default=10)
+    sync.add_argument("--max-pages", type=int, default=100)
+    sync.add_argument("--all-pages", action="store_true")
+    sync.add_argument("--resume", action="store_true")
+    sync.add_argument("--request-delay-seconds", type=float, default=1.5)
+    sync.add_argument("--confirm-public-source-access", action="store_true", required=True)
     extract = commands.add_parser("extract-pdf")
     extract.add_argument("--dataset-version", required=True)
     extract.add_argument("--data-root", default="data/raw")
@@ -170,6 +266,8 @@ def main(argv: list[str] | None = None) -> int:
         return _discover(args)
     if args.command == "crawl":
         return _crawl(args)
+    if args.command == "sync-vbpl":
+        return _sync_vbpl(args)
     return _extract_pdf(args)
 
 
