@@ -55,3 +55,46 @@ def test_gateway_manifest_uses_config_hash_and_requires_resume(tmp_path) -> None
 
     resumed = prepare(root, "vbpl-gateway-pilot-v1", "https://example.test/api", page_size=10, resume=True)
     assert resumed.seed_sha256 == first.seed_sha256
+
+def test_cli_accepts_full_gateway_sync_arguments() -> None:
+    args = build_parser().parse_args(
+        [
+            "sync-vbpl",
+            "--api-base-url", "https://example.test/api",
+            "--dataset-version", "vbpl-gateway-full-v1",
+            "--status-scope", "all",
+            "--all-pages",
+            "--max-discovery-passes", "3",
+            "--confirm-public-source-access",
+        ]
+    )
+
+    assert args.status_scope == "all"
+    assert args.max_discovery_passes == 3
+    assert args.all_pages is True
+
+
+def test_full_gateway_manifest_is_incompatible_with_selected_scope(tmp_path) -> None:
+    from legal_assistant import cli
+
+    root = tmp_path / "raw" / "vbpl-gateway-full-v1"
+    full = cli.prepare_gateway_manifest(
+        root,
+        "vbpl-gateway-full-v1",
+        "https://example.test/api",
+        page_size=10,
+        status_scope="all",
+        resume=False,
+    )
+    root.mkdir(parents=True)
+    (root / "manifest.json").write_text(full.model_dump_json(), encoding="utf-8")
+
+    with pytest.raises(cli.DatasetCompatibilityError):
+        cli.prepare_gateway_manifest(
+            root,
+            "vbpl-gateway-full-v1",
+            "https://example.test/api",
+            page_size=10,
+            status_scope="selected",
+            resume=True,
+        )

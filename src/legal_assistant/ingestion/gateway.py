@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import httpx
 
 from .crawler import SourceAccessBlocked, SourceScopeViolation, _origin, is_access_blocked
+from .gateway_state import GatewaySyncState
 from .models import ArtifactKind, CrawlRecord, DatasetManifest, SeedRecord
 from .storage import RawStore
 
@@ -29,7 +30,11 @@ class VBPLGatewaySyncService:
         max_attempts: int = 3,
         sleep_fn: Callable[[float], None] = sleep,
         checkpoint_writer: Callable[[DatasetManifest], None] | None = None,
+        state: GatewaySyncState | None = None,
+        status_scope: str = "selected",
     ) -> None:
+        if status_scope not in {"selected", "all"}:
+            raise ValueError("status_scope must be selected or all")
         self.client = client
         self.store = store
         self.api_base_url = api_base_url.rstrip("/")
@@ -37,6 +42,8 @@ class VBPLGatewaySyncService:
         self.max_attempts = max_attempts
         self.sleep_fn = sleep_fn
         self.checkpoint_writer = checkpoint_writer
+        self.state = state
+        self.status_scope = status_scope
         _origin(self.api_base_url)
 
     @property
@@ -52,17 +59,58 @@ class VBPLGatewaySyncService:
         *,
         page_size: int = 10,
         max_pages: int | None = 100,
+        max_discovery_passes: int = 1,
     ) -> None:
         if page_size <= 0:
             raise ValueError("page_size must be positive")
         if max_pages is not None and max_pages <= 0:
             raise ValueError("max_pages must be positive or None")
+        if max_discovery_passes <= 0:
+            raise ValueError("max_discovery_passes must be positive")
 
         self._retry_pending(manifest)
         self._write_checkpoint(manifest)
-        page_number = manifest.checkpoint.last_completed_page + 1
-        pages_processed = 0
+        for pass_number in range(1, max_discovery_passes + 1):
+            completed_full_pass, total, totals_stable = self._run_discovery_pass(
+                manifest,
+                pass_number=pass_number,
+                page_size=page_size,
+                max_pages=max_pages,
+            )
+            if not completed_full_pass:
+                return
+            seen_count = self._seen_count(manifest)
+            if totals_stable and total == manifest.checkpoint.observed_total:
+                manifest.checkpoint.stable_total_passes += 1
+            else:
+                manifest.checkpoint.stable_total_passes = 0
+            required_stable_passes = 1 if max_discovery_passes == 1 else 2
+            manifest.discovery_complete = (
+                totals_stable
+                and total is not None
+                and seen_count == total
+                and manifest.checkpoint.stable_total_passes >= required_stable_passes
+            )
+            manifest.discovery_incomplete = False
+            self._write_checkpoint(manifest)
+            if manifest.discovery_complete:
+                return
 
+        manifest.discovery_incomplete = True
+        self._write_checkpoint(manifest)
+
+    def _run_discovery_pass(
+        self,
+        manifest: DatasetManifest,
+        *,
+        pass_number: int,
+        page_size: int,
+        max_pages: int | None,
+    ) -> tuple[bool, int | None, bool]:
+        page_number = 1
+        pages_processed = 0
+        pass_total: int | None = None
+        totals_stable = True
         while max_pages is None or pages_processed < max_pages:
             response = self._request(
                 "POST",
@@ -78,7 +126,7 @@ class VBPLGatewaySyncService:
             fetched_at = datetime.now(UTC)
             list_artifact, _ = self.store.persist_bytes(
                 kind=ArtifactKind.DISCOVERY_JSON,
-                source_id=f"{self.source_identifier}:list:page:{page_number}",
+                source_id=f"{self.source_identifier}:list:pass:{pass_number}:page:{page_number}",
                 source_url=str(response.url),
                 fetched_at=fetched_at,
                 payload=response.content,
@@ -92,6 +140,12 @@ class VBPLGatewaySyncService:
             total = payload.get("total")
             if not isinstance(items, list) or not isinstance(total, int):
                 raise ValueError("gateway list response requires data.total and data.items")
+            if pass_total is None:
+                pass_total = total
+            elif pass_total != total:
+                totals_stable = False
+                manifest.retrieval_errors.append(f"pass {pass_number} total changed: {pass_total}->{total}")
+                pass_total = total
             self._record_observed_total(manifest, total)
             self._process_items(manifest, items, fetched_at)
             manifest.checkpoint.last_completed_page = page_number
@@ -100,12 +154,9 @@ class VBPLGatewaySyncService:
 
             total_pages = ceil(total / page_size)
             if page_number >= total_pages or not items:
-                seen_count = len(set(manifest.checkpoint.seen_source_ids))
-                manifest.discovery_complete = seen_count == total
-                manifest.discovery_incomplete = not manifest.discovery_complete
-                self._write_checkpoint(manifest)
-                return
+                return True, pass_total, totals_stable
             page_number += 1
+        return False, pass_total, totals_stable
 
     def _record_observed_total(self, manifest: DatasetManifest, total: int) -> None:
         previous = manifest.checkpoint.observed_total
@@ -113,12 +164,7 @@ class VBPLGatewaySyncService:
             manifest.retrieval_errors.append(f"observed total changed: {previous}->{total}")
         manifest.checkpoint.observed_total = total
 
-    def _process_items(
-        self,
-        manifest: DatasetManifest,
-        items: list[object],
-        discovered_at: datetime,
-    ) -> None:
+    def _process_items(self, manifest: DatasetManifest, items: list[object], discovered_at: datetime) -> None:
         seen = set(manifest.checkpoint.seen_source_ids)
         completed = set(manifest.checkpoint.completed_source_ids)
         pending = {seed.source_id: seed for seed in manifest.pending_seeds}
@@ -127,13 +173,21 @@ class VBPLGatewaySyncService:
                 continue
             document_id = str(item["id"])
             source_id = f"{self.source_identifier}:{document_id}"
-            if source_id in seen:
+            already_seen = self.state.has_seen(source_id) if self.state is not None else source_id in seen
+            if self.state is not None and self.state.is_completed(source_id):
                 continue
-            seen.add(source_id)
-            manifest.checkpoint.seen_source_ids.append(source_id)
+            if self.state is None and source_id in completed:
+                continue
+            if not already_seen:
+                if self.state is not None:
+                    self.state.mark_seen(source_id)
+                else:
+                    seen.add(source_id)
+                    manifest.checkpoint.seen_source_ids.append(source_id)
             status_label = _status_name(item.get("effStatus"))
-            _increment(manifest.status_counts, status_label or "unknown")
-            if not _is_selected_status(status_label):
+            if not already_seen:
+                _increment(manifest.status_counts, status_label or "unknown")
+            if self.status_scope == "selected" and not _is_selected_status(status_label):
                 _increment(manifest.skipped_status_counts, status_label or "unknown")
                 continue
 
@@ -147,30 +201,38 @@ class VBPLGatewaySyncService:
                 discovered_at=discovered_at,
                 source_status_label=status_label,
                 selection_bucket=_selection_bucket(status_label),
-                selection_reason="gateway_status_filter",
+                selection_reason="gateway_status_filter" if self.status_scope == "selected" else "gateway_full_status_scope",
             )
-            if source_id in completed:
+            if self.state is not None and self.state.is_completed(source_id):
+                continue
+            if self.state is None and source_id in completed:
                 continue
             try:
-                manifest.records.append(self._fetch_detail(seed))
-                manifest.checkpoint.completed_source_ids.append(source_id)
+                record = self._fetch_detail(seed)
+                self._store_record(manifest, record)
+                completed.add(source_id)
             except (SourceAccessBlocked, SourceScopeViolation):
                 raise
             except Exception as error:
                 manifest.checkpoint.failed_source_ids.append(source_id)
                 manifest.retrieval_errors.append(f"{source_id}:{type(error).__name__}:{error}")
                 pending[source_id] = seed
+                if self.state is not None:
+                    self.state.mark_pending(source_id)
         manifest.pending_seeds = list(pending.values())
 
     def _retry_pending(self, manifest: DatasetManifest) -> None:
         remaining: list[SeedRecord] = []
         completed = set(manifest.checkpoint.completed_source_ids)
         for seed in manifest.pending_seeds:
-            if seed.source_id in completed:
+            if self.state is not None and self.state.is_completed(seed.source_id):
+                continue
+            if self.state is None and seed.source_id in completed:
                 continue
             try:
-                manifest.records.append(self._fetch_detail(seed))
-                manifest.checkpoint.completed_source_ids.append(seed.source_id)
+                record = self._fetch_detail(seed)
+                self._store_record(manifest, record)
+                completed.add(seed.source_id)
             except (SourceAccessBlocked, SourceScopeViolation):
                 raise
             except Exception as error:
@@ -178,7 +240,26 @@ class VBPLGatewaySyncService:
                 remaining.append(seed)
         manifest.pending_seeds = remaining
 
+    def _store_record(self, manifest: DatasetManifest, record: CrawlRecord) -> None:
+        if self.state is None:
+            manifest.records.append(record)
+            manifest.checkpoint.completed_source_ids.append(record.source_id)
+            return
+        self.state.append_record(record)
+        self.state.mark_completed(record.source_id)
+        manifest.record_count += 1
+
+    def _seen_count(self, manifest: DatasetManifest) -> int:
+        if self.state is not None:
+            return self.state.counts()[0]
+        return len(set(manifest.checkpoint.seen_source_ids))
+
     def _write_checkpoint(self, manifest: DatasetManifest) -> None:
+        if self.state is not None:
+            seen, completed, pending = self.state.counts()
+            manifest.checkpoint.seen_count = seen
+            manifest.checkpoint.completed_count = completed
+            manifest.checkpoint.pending_count = pending
         if self.checkpoint_writer is not None:
             self.checkpoint_writer(manifest)
 
@@ -197,28 +278,12 @@ class VBPLGatewaySyncService:
             http_status=response.status_code,
             suffix=".json",
         )
-        record = CrawlRecord(
-            source_id=seed.source_id,
-            canonical_url=seed.canonical_url,
-            artifacts=[json_artifact],
-            source_status_label=seed.source_status_label,
-            selection_bucket=seed.selection_bucket,
-        )
+        record = CrawlRecord(source_id=seed.source_id, canonical_url=seed.canonical_url, artifacts=[json_artifact], source_status_label=seed.source_status_label, selection_bucket=seed.selection_bucket)
         data = response.json().get("data", {})
         document_content = data.get("documentContent", {}) if isinstance(data, dict) else {}
         html = document_content.get("content") if isinstance(document_content, dict) else None
         if isinstance(html, str) and html.strip():
-            html_artifact, _ = self.store.persist_bytes(
-                kind=ArtifactKind.DOCUMENT_HTML,
-                source_id=seed.source_id,
-                source_url=str(response.url),
-                fetched_at=fetched_at,
-                payload=html.encode("utf-8"),
-                media_type="text/html; charset=utf-8",
-                http_status=response.status_code,
-                suffix=".html",
-                source_artifact_id=json_artifact.artifact_id,
-            )
+            html_artifact, _ = self.store.persist_bytes(kind=ArtifactKind.DOCUMENT_HTML, source_id=seed.source_id, source_url=str(response.url), fetched_at=fetched_at, payload=html.encode("utf-8"), media_type="text/html; charset=utf-8", http_status=response.status_code, suffix=".html", source_artifact_id=json_artifact.artifact_id)
             record.artifacts.append(html_artifact)
         return record
 

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from datetime import UTC, datetime
 
 import httpx
@@ -83,3 +84,112 @@ def test_gateway_sync_stops_when_a_selected_document_is_blocked(tmp_path) -> Non
 
     with pytest.raises(SourceAccessBlocked):
         service.sync(_manifest(), max_pages=1)
+
+def test_full_scope_fetches_details_for_every_status_and_writes_record_log(tmp_path) -> None:
+    from legal_assistant.ingestion.gateway_state import GatewaySyncState
+
+    statuses = ["active", "partially_expired", "future", "fully_expired", "unknown"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "total": len(statuses),
+                        "pageNumber": 1,
+                        "pageSize": 10,
+                        "items": [
+                            {"id": index, "effStatus": {"name": status}}
+                            for index, status in enumerate(statuses, start=1)
+                        ],
+                    }
+                },
+            )
+        document_id = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"data": {"documentContent": {"content": f"<p>{document_id}</p>"}}})
+
+    state = GatewaySyncState(tmp_path / "raw")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VBPLGatewaySyncService(
+        client=client,
+        store=RawStore(tmp_path / "raw"),
+        api_base_url="https://example.test/api",
+        request_delay_seconds=0,
+        state=state,
+        status_scope="all",
+    )
+    manifest = _manifest()
+
+    service.sync(manifest, max_pages=None, max_discovery_passes=1)
+
+    assert state.counts() == (5, 5, 0)
+    assert len((tmp_path / "raw" / "records.jsonl").read_text(encoding="utf-8").splitlines()) == 5
+    assert manifest.discovery_complete is True
+    state.close()
+
+
+def test_full_sync_repeats_discovery_until_unique_ids_match_total(tmp_path) -> None:
+    from legal_assistant.ingestion.gateway_state import GatewaySyncState
+
+    listing_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal listing_calls
+        if request.method == "POST":
+            listing_calls += 1
+            page = json.loads(request.content)["pageNumber"]
+            document_id = 1 if listing_calls <= 2 else page
+            return httpx.Response(
+                200,
+                json={"data": {"total": 2, "pageNumber": page, "pageSize": 1, "items": [{"id": document_id, "effStatus": {"name": "active"}}]}},
+            )
+        document_id = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json={"data": {"documentContent": {"content": document_id}}})
+
+    state = GatewaySyncState(tmp_path / "raw")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    service = VBPLGatewaySyncService(
+        client=client,
+        store=RawStore(tmp_path / "raw"),
+        api_base_url="https://example.test/api",
+        request_delay_seconds=0,
+        state=state,
+        status_scope="all",
+    )
+    manifest = _manifest()
+
+    service.sync(manifest, page_size=1, max_pages=None, max_discovery_passes=2)
+
+    assert listing_calls == 4
+    assert state.counts()[0] == 2
+    assert manifest.discovery_complete is True
+    state.close()
+
+def test_full_sync_marks_manifest_incomplete_after_pass_limit(tmp_path) -> None:
+    from legal_assistant.ingestion.gateway_state import GatewaySyncState
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"data": {"total": 2, "pageNumber": 1, "pageSize": 10, "items": [{"id": 1, "effStatus": {"name": "active"}}]}},
+            )
+        return httpx.Response(200, json={"data": {"documentContent": {"content": "1"}}})
+
+    state = GatewaySyncState(tmp_path / "raw")
+    service = VBPLGatewaySyncService(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        store=RawStore(tmp_path / "raw"),
+        api_base_url="https://example.test/api",
+        request_delay_seconds=0,
+        state=state,
+        status_scope="all",
+    )
+    manifest = _manifest()
+
+    service.sync(manifest, max_pages=None, max_discovery_passes=3)
+
+    assert manifest.discovery_complete is False
+    assert manifest.discovery_incomplete is True
+    state.close()

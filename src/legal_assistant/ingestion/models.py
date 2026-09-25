@@ -92,6 +92,10 @@ class CrawlCheckpoint(BaseModel):
     seen_source_ids: list[str] = Field(default_factory=list)
     last_completed_page: int = 0
     observed_total: int | None = None
+    seen_count: int = 0
+    completed_count: int = 0
+    pending_count: int = 0
+    stable_total_passes: int = 0
     stopped_reason: str | None = None
 
 
@@ -103,6 +107,8 @@ class DatasetManifest(BaseModel):
     source_base_url: str
     seed_sha256: str
     records: list[CrawlRecord] = Field(default_factory=list)
+    record_log_path: str | None = None
+    record_count: int = 0
     discovery_artifacts: list[RawArtifact] = Field(default_factory=list)
     pending_seeds: list[SeedRecord] = Field(default_factory=list)
     checkpoint: CrawlCheckpoint = Field(default_factory=CrawlCheckpoint)

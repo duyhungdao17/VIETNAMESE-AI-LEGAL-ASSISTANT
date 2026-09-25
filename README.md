@@ -298,3 +298,21 @@ Xóa volume, re-ingest, migration, truy cập production, dùng credential trong
 Keep public interfaces typed, preserve source lineage, and test new behavior. Retrieval changes require a reproducible baseline comparison. Never commit `.env`, credentials, raw production data, or unverified legal citations.
 
 Giữ public interface có type, bảo toàn source lineage và test behavior mới. Thay đổi retrieval phải so sánh tái lập với baseline. Không commit `.env`, credential, raw production data hay legal citation chưa xác minh.
+### Full gateway corpus
+
+For a new full raw corpus, use a new dataset version and explicitly select every source status. This stores the immutable list/detail responses for active, partially expired, future, fully expired, and unclassified documents; future retrieval policy must filter by the recorded `source_status_label`, never delete source history.
+
+```powershell
+$gatewayBaseUrl = $env:LEGAL_ASSISTANT_GATEWAY_BASE_URL
+python -m legal_assistant.cli sync-vbpl `
+  --api-base-url $gatewayBaseUrl `
+  --dataset-version vbpl-gateway-full-v1 `
+  --status-scope all `
+  --all-pages `
+  --max-discovery-passes 3 `
+  --page-size 10 `
+  --request-delay-seconds 1.5 `
+  --confirm-public-source-access
+```
+
+Full sync writes immutable artifacts and `records.jsonl`; `sync-state.sqlite3` is mutable resume state only. Completion requires a complete listing pass with unique document IDs equal to the stable gateway total. After three full listing passes without that coverage, the manifest remains `discovery_incomplete`; resume or investigate rather than treating the corpus as complete.
