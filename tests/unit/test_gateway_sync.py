@@ -193,3 +193,32 @@ def test_full_sync_marks_manifest_incomplete_after_pass_limit(tmp_path) -> None:
     assert manifest.discovery_complete is False
     assert manifest.discovery_incomplete is True
     state.close()
+
+def test_full_sync_reports_progress_after_each_page(tmp_path) -> None:
+    from legal_assistant.ingestion.gateway_state import GatewaySyncState
+
+    events = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"data": {"total": 1, "pageNumber": 1, "pageSize": 10, "items": [{"id": 1, "effStatus": {"name": "active"}}]}})
+        return httpx.Response(200, json={"data": {"documentContent": {"content": "1"}}})
+
+    state = GatewaySyncState(tmp_path / "raw")
+    service = VBPLGatewaySyncService(
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        store=RawStore(tmp_path / "raw"),
+        api_base_url="https://example.test/api",
+        request_delay_seconds=0,
+        state=state,
+        status_scope="all",
+        progress_reporter=events.append,
+    )
+
+    service.sync(_manifest(), max_pages=None, max_discovery_passes=1)
+
+    assert events[-1].page_number == 1
+    assert events[-1].total_pages == 1
+    assert events[-1].completed_count == 1
+    assert events[-1].discovery_complete is True
+    state.close()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import ceil
 from time import sleep
@@ -14,6 +15,18 @@ from .gateway_state import GatewaySyncState
 from .models import ArtifactKind, CrawlRecord, DatasetManifest, SeedRecord
 from .storage import RawStore
 
+
+@dataclass(frozen=True)
+class GatewayProgress:
+    pass_number: int
+    max_discovery_passes: int
+    page_number: int
+    total_pages: int
+    seen_count: int
+    completed_count: int
+    pending_count: int
+    discovery_complete: bool
+    discovery_incomplete: bool
 
 class VBPLGatewaySyncService:
     """Checkpointable sync for the public VBPL gateway contract."""
@@ -32,6 +45,7 @@ class VBPLGatewaySyncService:
         checkpoint_writer: Callable[[DatasetManifest], None] | None = None,
         state: GatewaySyncState | None = None,
         status_scope: str = "selected",
+        progress_reporter: Callable[[GatewayProgress], None] | None = None,
     ) -> None:
         if status_scope not in {"selected", "all"}:
             raise ValueError("status_scope must be selected or all")
@@ -44,6 +58,7 @@ class VBPLGatewaySyncService:
         self.checkpoint_writer = checkpoint_writer
         self.state = state
         self.status_scope = status_scope
+        self.progress_reporter = progress_reporter
         _origin(self.api_base_url)
 
     @property
@@ -76,6 +91,7 @@ class VBPLGatewaySyncService:
                 pass_number=pass_number,
                 page_size=page_size,
                 max_pages=max_pages,
+                max_discovery_passes=max_discovery_passes,
             )
             if not completed_full_pass:
                 return
@@ -93,6 +109,13 @@ class VBPLGatewaySyncService:
             )
             manifest.discovery_incomplete = False
             self._write_checkpoint(manifest)
+            self._report_progress(
+                manifest,
+                pass_number,
+                max_discovery_passes,
+                manifest.checkpoint.last_completed_page,
+                ceil(total / page_size) if total else 0,
+            )
             if manifest.discovery_complete:
                 return
 
@@ -106,6 +129,7 @@ class VBPLGatewaySyncService:
         pass_number: int,
         page_size: int,
         max_pages: int | None,
+        max_discovery_passes: int,
     ) -> tuple[bool, int | None, bool]:
         page_number = 1
         pages_processed = 0
@@ -151,13 +175,25 @@ class VBPLGatewaySyncService:
             manifest.checkpoint.last_completed_page = page_number
             pages_processed += 1
             self._write_checkpoint(manifest)
+            self._report_progress(manifest, pass_number, max_discovery_passes, manifest.checkpoint.last_completed_page, ceil(total / page_size) if total else 0)
 
             total_pages = ceil(total / page_size)
+            self._report_progress(manifest, pass_number, max_discovery_passes, page_number, total_pages)
             if page_number >= total_pages or not items:
                 return True, pass_total, totals_stable
             page_number += 1
         return False, pass_total, totals_stable
 
+    def _report_progress(self, manifest: DatasetManifest, pass_number: int, max_discovery_passes: int, page_number: int, total_pages: int) -> None:
+        if self.progress_reporter is None:
+            return
+        if self.state is not None:
+            seen_count, completed_count, pending_count = self.state.counts()
+        else:
+            seen_count = len(set(manifest.checkpoint.seen_source_ids))
+            completed_count = len(set(manifest.checkpoint.completed_source_ids))
+            pending_count = len(manifest.pending_seeds)
+        self.progress_reporter(GatewayProgress(pass_number, max_discovery_passes, page_number, total_pages, seen_count, completed_count, pending_count, manifest.discovery_complete, manifest.discovery_incomplete))
     def _record_observed_total(self, manifest: DatasetManifest, total: int) -> None:
         previous = manifest.checkpoint.observed_total
         if previous is not None and previous != total:

@@ -11,7 +11,7 @@ import httpx
 
 from .ingestion.crawler import CrawlService, SourceAccessBlocked, SourceScopeViolation
 from .ingestion.discovery import DiscoveryService
-from .ingestion.gateway import VBPLGatewaySyncService
+from .ingestion.gateway import GatewayProgress, VBPLGatewaySyncService
 from .ingestion.gateway_state import GatewaySyncState
 from .ingestion.manifest import load_manifest, write_manifest
 from .ingestion.models import DatasetManifest, SeedRecord, SourceMode, SourceProfile
@@ -191,6 +191,17 @@ def _extract_pdf(args: argparse.Namespace) -> int:
 
 
 
+def _render_gateway_progress(progress: GatewayProgress) -> None:
+    coverage = 0.0
+    if progress.total_pages:
+        coverage = progress.seen_count / max(progress.seen_count, progress.total_pages) * 100
+    state = "complete" if progress.discovery_complete else "incomplete" if progress.discovery_incomplete else "running"
+    print(
+        f"\rpass {progress.pass_number}/{progress.max_discovery_passes} | page {progress.page_number}/{progress.total_pages} | seen {progress.seen_count} | completed {progress.completed_count} | pending {progress.pending_count} | {state}",
+        end="",
+        flush=True,
+    )
+
 def _sync_vbpl(args: argparse.Namespace) -> int:
     dataset_root = Path(args.data_root) / args.dataset_version
     manifest = prepare_gateway_manifest(
@@ -215,6 +226,7 @@ def _sync_vbpl(args: argparse.Namespace) -> int:
                 checkpoint_writer=lambda current: write_manifest(dataset_root, current),
                 state=state,
                 status_scope=args.status_scope,
+                progress_reporter=_render_gateway_progress,
             )
             try:
                 service.sync(
@@ -231,6 +243,7 @@ def _sync_vbpl(args: argparse.Namespace) -> int:
         if state is not None:
             state.close()
         write_manifest(dataset_root, manifest)
+        print()
     return 0
 
 def _source_mode_arguments(parser: argparse.ArgumentParser) -> None:
