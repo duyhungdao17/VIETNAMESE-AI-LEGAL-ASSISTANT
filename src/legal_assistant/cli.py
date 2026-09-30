@@ -9,6 +9,10 @@ from uuid import uuid4
 
 import httpx
 
+from .corpus.audit import audit_dataset
+from .corpus.evaluation import GoldCase, evaluate_variants, export_annotation_candidates
+from .corpus.pilot import build_pilot
+
 from .ingestion.crawler import CrawlService, SourceAccessBlocked, SourceScopeViolation
 from .ingestion.discovery import DiscoveryService
 from .ingestion.gateway import GatewayProgress, VBPLGatewaySyncService
@@ -286,11 +290,64 @@ def build_parser() -> argparse.ArgumentParser:
     extract = commands.add_parser("extract-pdf")
     extract.add_argument("--dataset-version", required=True)
     extract.add_argument("--data-root", default="data/raw")
+    audit = commands.add_parser('audit-corpus')
+    audit.add_argument('--dataset-root', required=True)
+    audit.add_argument('--report-out', required=True)
+    pilot = commands.add_parser('build-pilot')
+    pilot.add_argument('--dataset-root', required=True)
+    pilot.add_argument('--output', required=True)
+    pilot.add_argument('--limit', type=int, default=200)
+    pilot.add_argument('--seed', default='pilot-v1')
+    pilot.add_argument('--max-chars', type=int, default=1800)
+    evaluate = commands.add_parser('evaluate-chunking')
+    evaluate.add_argument('--pilot-dir', required=True)
+    evaluate.add_argument('--gold-file', required=True)
+    evaluate.add_argument('--split', default='test')
+    evaluate.add_argument('--top-k', type=int, default=20)
+    evaluate.add_argument('--report-out', required=True)
+    candidates = commands.add_parser('prepare-gold-candidates')
+    candidates.add_argument('--pilot-dir', required=True)
+    candidates.add_argument('--output', required=True)
+    candidates.add_argument('--per-document', type=int, default=3)
     return parser
+
+
+def _write_new_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open('x', encoding='utf-8') as handle:
+        json.dump(value, handle, ensure_ascii=False, indent=2)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == 'audit-corpus':
+        report = audit_dataset(Path(args.dataset_root))
+        _write_new_json(Path(args.report_out), report)
+        print(json.dumps(report['counts'], ensure_ascii=True))
+        return 0
+    if args.command == 'build-pilot':
+        manifest = build_pilot(Path(args.dataset_root), Path(args.output), limit=args.limit, seed=args.seed, max_chars=args.max_chars)
+        print(json.dumps({key: manifest[key] for key in ('document_count', 'chunk_count', 'discovery_chunk_count', 'parser_warning_count')}))
+        return 0
+    if args.command == 'evaluate-chunking':
+        gold_path = Path(args.gold_file)
+        gold = [GoldCase.model_validate_json(line) for line in gold_path.open(encoding='utf-8') if line.strip()]
+        pilot_path = Path(args.pilot_dir)
+        report = {
+            'pilot_manifest_sha256': hashlib.sha256((pilot_path / 'pilot_manifest.json').read_bytes()).hexdigest(),
+            'gold_sha256': hashlib.sha256(gold_path.read_bytes()).hexdigest(),
+            'split': args.split,
+            'top_k': args.top_k,
+            'retriever': 'bm25-local-v1',
+            'variants': evaluate_variants(pilot_path, gold, top_k=args.top_k, split=args.split),
+        }
+        _write_new_json(Path(args.report_out), report)
+        print(json.dumps({name: {'mrr': score['mrr'], 'recall_at_10': score.get('recall_at_10')} for name, score in report['variants'].items()}))
+        return 0
+    if args.command == 'prepare-gold-candidates':
+        count = export_annotation_candidates(Path(args.pilot_dir), Path(args.output), per_document=args.per_document)
+        print(json.dumps({'candidate_count': count}))
+        return 0
     if args.command == "discover":
         return _discover(args)
     if args.command == "crawl":

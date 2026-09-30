@@ -6,12 +6,14 @@
 
 ## Status | Trạng thái
 
-**Architecture and agent-workflow foundation.** This repository now includes a pilot ingestion CLI with immutable raw artifacts, manifests, checkpoints, and API/HTML hybrid acquisition. It does not yet contain the application API, index, Docker Compose configuration, or a published benchmark.
+**Ingestion and corpus-validation foundation.** The repository includes checkpointed crawl, immutable raw artifacts, full-corpus audit, pilot legal chunking, and a local BM25 comparison harness. It does not yet contain the application API, production index, Docker Compose configuration, or a human-labeled benchmark result.
 
-**Nền tảng kiến trúc và workflow cho agent.** Repository hiện chứa kiến trúc và workflow đề xuất; **chưa** có crawler, API, index, Docker Compose hay benchmark công bố. Roadmap không phải là claim rằng tính năng đã chạy.
+**Nền tảng ingestion và kiểm định corpus.** Repository đã có crawler, audit dữ liệu thô, chunking pilot và khung đánh giá BM25. Chưa có API ứng dụng, index production, Docker Compose hoặc kết quả benchmark được gán nhãn thủ công.
 
 
 ## Pilot ingestion | Pilot crawl
+
+Quy trình kiểm định, chunking và đánh giá: [Corpus pipeline](docs/corpus-pipeline.md).
 
 The `legal-assistant` CLI supports `api`, `html`, and `hybrid` source modes. `hybrid` is the default: it discovers metadata through a permitted public API, stores the raw JSON response, and falls back to the canonical public HTML document only when API detail lacks document content. No production endpoint is hard-coded.
 
